@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spray Lab</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1d2026;
+    --border: #2c3038;
+    --text: #e8e6e1;
+    --muted: #9a9890;
+    --recoil: #ff6b5e;
+    --mouse: #7bd88f;
+    --sum: #ffd75e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.6rem; margin: 0.2em 0; }
+  p { margin: 0.4em 0; }
+  .muted { color: var(--muted); font-size: 0.9rem; }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 12px 0;
+    border-radius: 8px;
+    cursor: none;
+    user-select: none;
+    touch-action: none;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    align-items: center;
+  }
+  button {
+    font: inherit;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  label { cursor: pointer; white-space: nowrap; }
+  .recoil { color: var(--recoil); }
+  .mouse { color: var(--mouse); }
+  .sum { color: var(--sum); }
+  #results {
+    margin-top: 16px;
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  #results[hidden] { display: none; }
+  .equation {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0;
+    font-size: 1.1rem;
+  }
+  .term { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+  .term small { font-size: 0.75rem; color: var(--muted); }
+  /* A column vector: two stacked numbers between curved brackets */
+  .col {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 3.2em;
+    padding: 2px 8px;
+    border-left: 2px solid currentColor;
+    border-right: 2px solid currentColor;
+    border-radius: 12px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.25;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Spray Lab</h1>
+  <p>Hold the left mouse button to spray at the target. Every shot kicks your aim up and sideways. Pull your mouse the <strong>opposite</strong> way to keep the bullets together.</p>
+  <p class="muted">Needs a mouse. The recoil pattern is made up, but it's shaped like an AK's.</p>
+
+  <canvas id="game"></canvas>
+
+  <div class="controls">
+    <button id="demo">Show a perfect spray</button>
+    <label><input type="checkbox" id="showRecoil" checked> <span class="recoil">Recoil kicks</span></label>
+    <label><input type="checkbox" id="showMouse" checked> <span class="mouse">Your mouse moves</span></label>
+    <label><input type="checkbox" id="showSum" checked> <span class="sum">Total drift</span></label>
+    <label><input type="checkbox" id="slowmo" checked> Slow motion</label>
+    <label>Recoil strength <input type="range" id="strength" min="0.5" max="2.5" step="0.1" value="1.5"> <span id="strengthValue">1.5</span></label>
+  </div>
+
+  <div id="results" hidden></div>
+</main>
+
+<script>
+// ✏️ Change these ------------------------------------------------------------
+
+const FIRE_RATE_MS = 100;  // time between shots: 100 ms is 600 rounds per minute
+const MAGAZINE = 30;
+const SLOW_MOTION = 0.25;  // slow motion runs at a quarter of normal speed
+const ARROW_ZOOM = 3;      // the arrows in the side panels are drawn 3 times bigger, so you can see them
+
+// How far each shot kicks your aim, as [across, up] in pixels.
+// Up is positive, just like in the notebooks. The first shot is perfectly accurate.
+const RECOIL_KICKS = [
+  [0, 0],
+  [-1, 8], [1, 10], [-2, 12], [2, 13], [1, 13], [-1, 12], [2, 10], [1, 8], [0, 6],  // climbs up
+  [-10, 2], [-12, 1], [-12, 0], [-10, 1], [-8, 0], [-6, 1], [-4, 0],                // swings left
+  [8, 1], [12, 0], [14, 1], [14, 0], [12, -1], [8, 1], [5, 0],                      // swings right
+  [-6, 1], [-10, 0], [-12, 1], [-10, 0], [-8, 1], [-4, 0],                          // and back left
+];
+
+// -----------------------------------------------------------------------------
+
+const W = 960, H = 600;            // the size we draw at; the canvas is scaled to fit the page
+const FLOOR_Y = 470;
+const HEAD = { x: 480, y: 205, r: 28 };
+const BODY = { x: 430, y: 235, w: 100, h: 235 };
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const dpr = window.devicePixelRatio || 1;
+canvas.width = W * dpr;
+canvas.height = H * dpr;
+
+const ui = {
+  demo: document.getElementById("demo"),
+  showRecoil: document.getElementById("showRecoil"),
+  showMouse: document.getElementById("showMouse"),
+  showSum: document.getElementById("showSum"),
+  slowmo: document.getElementById("slowmo"),
+  strength: document.getElementById("strength"),
+  strengthValue: document.getElementById("strengthValue"),
+  results: document.getElementById("results"),
+};
+
+// The game's state: everything the drawing code needs to know
+let mouse = { x: W / 2, y: 320 };  // where the crosshair is, in canvas pixels (y goes DOWN on a canvas)
+let firing = false;
+let demo = false;
+let demoStart = null;
+let lastShotTime = -Infinity;
+let shots = [];                    // one entry per bullet fired in the current spray
+let recoil = { x: 0, y: 0 };       // running total of the kicks so far, with up positive
+
+// ---- Input ------------------------------------------------------------------
+
+function toCanvas(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * W / rect.width,
+    y: (e.clientY - rect.top) * H / rect.height,
+  };
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || demo) return;
+  e.preventDefault();
+  mouse = toCanvas(e);
+  startSpray();
+});
+window.addEventListener("mousemove", (e) => {
+  if (!demo) mouse = toCanvas(e);
+});
+window.addEventListener("mouseup", (e) => {
+  if (e.button === 0 && firing && !demo) endSpray();
+});
+
+ui.demo.addEventListener("click", () => {
+  if (firing) return;
+  demo = true;
+  demoStart = { x: BODY.x + BODY.w / 2, y: 300 };
+  mouse = { ...demoStart };
+  startSpray();
+});
+
+ui.strength.addEventListener("input", () => {
+  ui.strengthValue.textContent = ui.strength.value;
+});
+
+// ---- Shooting -----------------------------------------------------------------
+
+function startSpray() {
+  shots = [];
+  recoil = { x: 0, y: 0 };
+  lastShotTime = -Infinity;
+  firing = true;
+  ui.results.hidden = true;
+}
+
+function fire(now) {
+  const i = shots.length;
+  const scale = Number(ui.strength.value);
+  const kick = { x: RECOIL_KICKS[i][0] * scale, y: RECOIL_KICKS[i][1] * scale };
+  recoil = { x: recoil.x + kick.x, y: recoil.y + kick.y };
+
+  // A perfect spray: move the mouse by exactly the negative of the recoil so far
+  if (demo) mouse = { x: demoStart.x - recoil.x, y: demoStart.y + recoil.y };
+
+  // Where the bullet lands = where you aim + the recoil so far.
+  // On a canvas y points down, so "up" means subtracting.
+  const hit = { x: mouse.x + recoil.x, y: mouse.y - recoil.y };
+  // How far you moved the mouse since the last shot, in maths directions (up positive)
+  const previous = shots.length > 0 ? shots[shots.length - 1].aim : mouse;
+  const move = { x: mouse.x - previous.x, y: -(mouse.y - previous.y) };
+  shots.push({ aim: { ...mouse }, kick, move, hit });
+  lastShotTime = now;
+
+  if (shots.length >= MAGAZINE) endSpray();
+}
+
+function endSpray() {
+  firing = false;
+  demo = false;
+  if (shots.length > 0) showResults();
+}
+
+function hitZone(p) {
+  if (Math.hypot(p.x - HEAD.x, p.y - HEAD.y) <= HEAD.r) return "head";
+  if (p.x >= BODY.x && p.x <= BODY.x + BODY.w && p.y >= BODY.y && p.y <= BODY.y + BODY.h) return "body";
+  return null;
+}
+
+function speed() {
+  return ui.slowmo.checked ? SLOW_MOTION : 1;
+}
+
+// ---- Results ------------------------------------------------------------------
+
+function fmt(n) {
+  // Round the size, then put the sign back, so 46.5 and −46.5 become 47 and −47
+  const r = Math.round(Math.abs(n));
+  return (n < 0 && r !== 0 ? "−" : "") + r;  // a proper minus sign
+}
+
+function column(v, cls) {
+  // v uses maths directions: across, then up
+  return `<span class="col ${cls}"><span>${fmt(v.x)}</span><span>${fmt(v.y)}</span></span>`;
+}
+
+function showResults() {
+  const first = shots[0], last = shots[shots.length - 1];
+  const totalRecoil = { x: recoil.x, y: recoil.y };
+  // Mouse movement in maths directions: flip y, because a canvas counts downwards
+  const totalMouse = { x: last.aim.x - first.aim.x, y: -(last.aim.y - first.aim.y) };
+  const drift = { x: totalRecoil.x + totalMouse.x, y: totalRecoil.y + totalMouse.y };
+  const driftLength = Math.hypot(drift.x, drift.y);
+
+  const zones = shots.map((s) => hitZone(s.hit));
+  const heads = zones.filter((z) => z === "head").length;
+  const hits = zones.filter((z) => z !== null).length;
+
+  let verdict;
+  if (driftLength < 15) {
+    verdict = "Near perfect: your mouse movement was almost exactly the negative of the recoil, so they cancel out to (almost) the zero vector.";
+  } else if (Math.abs(totalMouse.y) < 0.4 * Math.abs(totalRecoil.y)) {
+    verdict = "The recoil pushed you up and you didn't pull down enough. Try pulling down harder, and earlier.";
+  } else {
+    verdict = "Compare the green chain with the red one. For a perfect spray, green would be red turned round.";
+  }
+
+  ui.results.innerHTML = `
+    <p><strong>${hits} / ${shots.length}</strong> shots hit the target (${heads} in the head).</p>
+    <div class="equation">
+      <span class="term">${column(totalRecoil, "recoil")}<small>total recoil</small></span>
+      <span>+</span>
+      <span class="term">${column(totalMouse, "mouse")}<small>your mouse</small></span>
+      <span>=</span>
+      <span class="term">${column(drift, "sum")}<small>total drift</small></span>
+    </div>
+    <p>The total drift has length <strong class="sum">${driftLength.toFixed(0)} pixels</strong>. ${verdict}</p>
+    <p class="muted">Every vector is in pixels, with up as positive.</p>
+  `;
+  ui.results.hidden = false;
+}
+
+// ---- Drawing --------------------------------------------------------------------
+
+function drawWall() {
+  ctx.fillStyle = "#6d7178";
+  ctx.fillRect(0, 0, W, FLOOR_Y);
+  // concrete panels
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.18)";
+  ctx.lineWidth = 2;
+  for (let x = 0; x <= W; x += 160) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, FLOOR_Y); ctx.stroke();
+  }
+  for (let y = 0; y <= FLOOR_Y; y += 120) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.fillStyle = "#4b4e54";
+  ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+}
+
+function drawTarget() {
+  ctx.fillStyle = "#c9a36b";
+  ctx.strokeStyle = "#7a5a30";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(BODY.x, BODY.y, BODY.w, BODY.h, 14);
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(HEAD.x, HEAD.y, HEAD.r, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+}
+
+function drawHoles() {
+  for (const s of shots) {
+    ctx.beginPath();
+    ctx.arc(s.hit.x, s.hit.y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#15161a";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+function drawArrow(x1, y1, x2, y2, color, width) {
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  if (len < 0.5) return;
+  const head = Math.min(8, len * 0.5);
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  // Draw twice: a dark outline first, then the colour on top, so it shows up on any background
+  for (const [c, w] of [["rgba(0, 0, 0, 0.6)", width + 2], [color, width]]) {
+    ctx.strokeStyle = c;
+    ctx.fillStyle = c;
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2 - head * 0.6 * Math.cos(angle), y2 - head * 0.6 * Math.sin(angle));
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - head * Math.cos(angle - 0.45), y2 - head * Math.sin(angle - 0.45));
+    ctx.lineTo(x2 - head * Math.cos(angle + 0.45), y2 - head * Math.sin(angle + 0.45));
+    ctx.closePath();
+    ctx.fill();
+    if (c !== color) ctx.stroke();
+  }
+}
+
+function drawAnalysis() {
+  const styles = getComputedStyle(document.documentElement);
+  const first = shots[0], last = shots[shots.length - 1];
+
+  // Red: the kicks tip to tail, starting at the first bullet hole.
+  // This is where your bullets would have gone if you hadn't moved the mouse.
+  let p = { ...first.hit };
+  const recoilChain = [];
+  for (const s of shots.slice(1)) {
+    const q = { x: p.x + s.kick.x, y: p.y - s.kick.y };
+    recoilChain.push([p, q]);
+    p = q;
+  }
+  // Green: your mouse moves tip to tail, carrying on from the end of the red chain
+  const mouseChain = [];
+  for (let i = 1; i < shots.length; i++) {
+    const d = { x: shots[i].aim.x - shots[i - 1].aim.x, y: shots[i].aim.y - shots[i - 1].aim.y };
+    const q = { x: p.x + d.x, y: p.y + d.y };
+    mouseChain.push([p, q]);
+    p = q;
+  }
+
+  if (ui.showRecoil.checked) {
+    for (const [a, b] of recoilChain) drawArrow(a.x, a.y, b.x, b.y, styles.getPropertyValue("--recoil"), 2);
+  }
+  if (ui.showMouse.checked) {
+    for (const [a, b] of mouseChain) drawArrow(a.x, a.y, b.x, b.y, styles.getPropertyValue("--mouse"), 2);
+  }
+  if (ui.showSum.checked) {
+    // Yellow: the total drift, from the first bullet hole to the last
+    drawArrow(first.hit.x, first.hit.y, last.hit.x, last.hit.y, styles.getPropertyValue("--sum"), 4);
+    ctx.fillStyle = styles.getPropertyValue("--sum");
+    ctx.beginPath();
+    ctx.arc(first.hit.x, first.hit.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// A column vector on the canvas: two numbers between curved brackets
+function drawColumn(cx, cy, v, color, size) {
+  ctx.font = `${size}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = color;
+  const top = fmt(v.x), bottom = fmt(v.y);
+  ctx.fillText(top, cx, cy - 0.6 * size);
+  ctx.fillText(bottom, cx, cy + 0.6 * size);
+  const half = Math.max(ctx.measureText(top).width, ctx.measureText(bottom).width) / 2 + 0.45 * size;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  for (const side of [-1, 1]) {
+    const x = cx + side * half;
+    ctx.beginPath();
+    ctx.moveTo(x - side * 0.25 * size, cy - 1.2 * size);
+    ctx.quadraticCurveTo(x + side * 0.25 * size, cy, x - side * 0.25 * size, cy + 1.2 * size);
+    ctx.stroke();
+  }
+}
+
+// One side panel: this shot's vector as a big arrow, plus the column vectors
+function drawPanel(x0, title, color, vector, total) {
+  const w = 230, h = 200, y0 = 16;
+  ctx.save();
+  ctx.fillStyle = "rgba(20, 22, 26, 0.85)";
+  ctx.beginPath(); ctx.roundRect(x0, y0, w, h, 10); ctx.fill();
+
+  ctx.font = "bold 16px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = color;
+  ctx.fillText(title, x0 + 14, y0 + 26);
+  ctx.font = "13px system-ui, sans-serif";
+  ctx.fillStyle = "#9a9890";
+  ctx.fillText(`shot ${shots.length} of ${MAGAZINE}`, x0 + 14, y0 + 46);
+
+  // The arrow, in a box of its own, starting from the middle
+  const box = { x: x0 + 14, y: y0 + 56, w: 122, h: 130 };
+  const c = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+  ctx.save();
+  ctx.beginPath(); ctx.rect(box.x, box.y, box.w, box.h); ctx.clip();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(box.x, c.y); ctx.lineTo(box.x + box.w, c.y);
+  ctx.moveTo(c.x, box.y); ctx.lineTo(c.x, box.y + box.h);
+  ctx.stroke();
+  drawArrow(c.x, c.y, c.x + vector.x * ARROW_ZOOM, c.y - vector.y * ARROW_ZOOM, color, 3);
+  ctx.restore();
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.fillStyle = "#9a9890";
+  ctx.fillText(`arrow ×${ARROW_ZOOM}`, box.x + 2, box.y + box.h - 4);
+
+  // This shot, and the running total
+  drawColumn(x0 + 180, y0 + 88, vector, color, 18);
+  drawColumn(x0 + 180, y0 + 160, total, color, 15);
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#9a9890";
+  ctx.fillText("this shot", x0 + 180, y0 + 124);
+  ctx.fillText("total so far", x0 + 180, y0 + 193);
+  ctx.restore();
+}
+
+function drawPanels() {
+  if (shots.length === 0) return;
+  const styles = getComputedStyle(document.documentElement);
+  const first = shots[0], last = shots[shots.length - 1];
+  const totalMouse = { x: last.aim.x - first.aim.x, y: -(last.aim.y - first.aim.y) };
+  drawPanel(16, "Gun kick", styles.getPropertyValue("--recoil"), last.kick, recoil);
+  drawPanel(W - 16 - 230, "Your adjustment", styles.getPropertyValue("--mouse"), last.move, totalMouse);
+}
+
+function drawGun(now) {
+  const sinceShot = now - lastShotTime;
+  const kickBack = Math.max(0, 1 - sinceShot * speed() / 90);  // jolts on each shot, then settles
+
+  ctx.save();
+  ctx.translate(880 + kickBack * 12, 575);
+  ctx.rotate(0.24 + kickBack * 0.04);
+  ctx.scale(1.05, 1.05);
+
+  const metal = "#2a2b2f", metalLight = "#3b3d42", wood = "#8a4b22", woodDark = "#6b3818";
+
+  // Stock
+  ctx.fillStyle = wood;
+  ctx.beginPath();
+  ctx.moveTo(60, -12); ctx.lineTo(240, 6); ctx.lineTo(245, 64); ctx.lineTo(70, 22);
+  ctx.closePath(); ctx.fill();
+  // Pistol grip
+  ctx.fillStyle = woodDark;
+  ctx.beginPath();
+  ctx.moveTo(22, 12); ctx.lineTo(10, 86); ctx.lineTo(40, 90); ctx.lineTo(48, 12);
+  ctx.closePath(); ctx.fill();
+  // Curved magazine
+  ctx.fillStyle = "#9a4a22";
+  ctx.beginPath();
+  ctx.moveTo(-95, 12);
+  ctx.quadraticCurveTo(-108, 70, -150, 122);
+  ctx.lineTo(-114, 138);
+  ctx.quadraticCurveTo(-74, 82, -58, 12);
+  ctx.closePath(); ctx.fill();
+  // Receiver
+  ctx.fillStyle = metal;
+  ctx.beginPath(); ctx.roundRect(-125, -22, 195, 36, 5); ctx.fill();
+  ctx.strokeStyle = metalLight; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-110, -12); ctx.lineTo(60, -12); ctx.stroke();
+  // Trigger guard
+  ctx.strokeStyle = metal; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(0, 16, 16, 0, Math.PI); ctx.stroke();
+  // Rear sight
+  ctx.fillStyle = metal;
+  ctx.fillRect(-138, -28, 22, 10);
+  // Handguards
+  ctx.fillStyle = wood;
+  ctx.beginPath(); ctx.roundRect(-240, -8, 118, 24, 5); ctx.fill();
+  ctx.fillStyle = woodDark;
+  ctx.beginPath(); ctx.roundRect(-230, -26, 100, 14, 4); ctx.fill();
+  // Barrel, front sight and muzzle brake
+  ctx.fillStyle = metal;
+  ctx.fillRect(-340, -8, 102, 9);
+  ctx.beginPath();
+  ctx.moveTo(-322, -8); ctx.lineTo(-318, -28); ctx.lineTo(-310, -28); ctx.lineTo(-306, -8);
+  ctx.closePath(); ctx.fill();
+  ctx.fillRect(-356, -10, 18, 13);
+
+  // Muzzle flash, just after each shot
+  if (sinceShot * speed() < 45) {
+    ctx.fillStyle = "#ffd75e";
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? 34 : 12;
+      const a = Math.PI + (i - 4.5) * 0.32;
+      ctx.lineTo(-360 + r * Math.cos(a), -3 + r * Math.sin(a));
+    }
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCrosshair() {
+  const { x, y } = mouse;
+  const gap = 5, len = 9;
+  const lines = [[x - gap - len, y, x - gap, y], [x + gap, y, x + gap + len, y],
+                 [x, y - gap - len, x, y - gap], [x, y + gap, x, y + gap + len]];
+  for (const [color, width] of [["rgba(0, 0, 0, 0.7)", 4], ["#4cff4c", 2]]) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    for (const [a, b, c, d] of lines) {
+      ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke();
+    }
+  }
+}
+
+function drawHud() {
+  ctx.fillStyle = "#e8e6e1";
+  ctx.font = "bold 28px system-ui, sans-serif";
+  ctx.fillText(`${MAGAZINE - shots.length} / ${MAGAZINE}`, 24, H - 24);
+}
+
+// ---- The game loop: runs about 60 times a second --------------------------------
+
+function loop(now) {
+  // 1. Update: fire the next bullet if the trigger is held and enough time has passed
+  if (firing && now - lastShotTime >= FIRE_RATE_MS / speed()) fire(now);
+
+  // 2. Draw: wipe everything and draw the whole scene again
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawWall();
+  drawTarget();
+  drawHoles();
+  if (!firing && shots.length > 1) drawAnalysis();
+  drawPanels();
+  drawGun(now);
+  drawCrosshair();
+  drawHud();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Everything the notebooks need. Tested with Python 3.11.
+#
+# The GPU race in session 4 also needs PyTorch with graphics card support.
+# It's a separate, large download, so it isn't listed here. See session 4, Part 5:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu130
+
+jupyterlab==4.6.1
+ipywidgets==8.1.8
+numpy==2.4.6
+matplotlib==3.11.0
+scikit-learn==1.9.0
+manim==0.21.0
